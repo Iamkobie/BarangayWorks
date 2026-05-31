@@ -193,6 +193,15 @@ export default function WorkerPreviewCard({
               📋 Request Service
             </button>
 
+            {/* View Profile — access to chat, rating, full details */}
+            <Link
+              to={`/worker/${id}`}
+              className="flex items-center justify-center w-full min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-gray-700 text-sm font-medium border border-gray-200 hover:bg-gray-50 transition-all duration-200"
+              aria-label={`View full profile of ${name}`}
+            >
+              👤 View Profile · 💬 Chat · ⭐ Rate
+            </Link>
+
             {/* Call button — secondary action */}
             {contactNumber && (
               <a
