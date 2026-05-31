@@ -14,6 +14,7 @@ import ClientRegister from './pages/ClientRegister';
 import WorkerRegister from './pages/WorkerRegister';
 import ClientDashboard from './pages/ClientDashboard';
 import WorkerDashboard from './pages/WorkerDashboard';
+import WorkerMessages from './pages/WorkerMessages';
 import WorkerProfile from './pages/WorkerProfile';
 import AdminDashboard from './pages/AdminDashboard';
 import ChatWindow from './components/Chat/ChatWindow';
@@ -75,6 +76,7 @@ function AppRoutes() {
       {/* Protected: Worker */}
       <Route element={<ProtectedRoute allowedRoles={['worker']} />}>
         <Route path="/dashboard/worker" element={<WorkerDashboard />} />
+        <Route path="/dashboard/worker/messages" element={<WorkerMessages />} />
       </Route>
 
       {/* Protected: Admin */}

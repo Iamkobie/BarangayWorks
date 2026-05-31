@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { supabase } from '../services/supabase';
 import { useAuthStore } from '../store/authStore';
 import { useToastStore } from '../store/toastStore';
@@ -491,30 +491,16 @@ export default function WorkerDashboard() {
 
           {/* Messages Section */}
           <section>
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
-              <h2 className="text-lg font-bold text-gray-900 mb-3 flex items-center gap-2">
+            <Link
+              to="/dashboard/worker/messages"
+              className="w-full flex items-center justify-between bg-white rounded-xl shadow-sm border border-gray-100 p-4 min-h-[44px] hover:bg-gray-50 transition-colors group"
+            >
+              <span className="font-bold text-gray-900 flex items-center gap-2">
                 💬 Messages
-              </h2>
-              <div className="space-y-2">
-                <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
-                  <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-sm">👤</div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-900 truncate">Maria Santos</p>
-                    <p className="text-xs text-gray-500 truncate">Hi, are you available tomorrow?</p>
-                  </div>
-                  <span className="text-[10px] text-gray-400">2m ago</span>
-                </div>
-                <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
-                  <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center text-sm">👤</div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-900 truncate">Roberto Cruz</p>
-                    <p className="text-xs text-gray-500 truncate">Thanks for the great work!</p>
-                  </div>
-                  <span className="text-[10px] text-gray-400">1h ago</span>
-                </div>
-              </div>
-              <p className="text-xs text-gray-400 text-center mt-3">Messages from clients who contacted you</p>
-            </div>
+                <span className="bg-red-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">3</span>
+              </span>
+              <span className="text-gray-400 group-hover:text-blue-600 transition-colors">→</span>
+            </Link>
           </section>
 
           {/* Profile Section */}
