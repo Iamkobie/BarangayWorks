@@ -1,5 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
+import { useAuthStore } from '../store/authStore';
+import { supabase } from '../services/supabase';
+import {
+  sendMessage,
+  getAllMessages,
+  subscribeToMessages,
+  type Message,
+} from '../services/messaging';
 
 // ============================================================
 // Types
@@ -10,10 +18,12 @@ interface ChatMessage {
   sender: 'client' | 'worker';
   content: string;
   time: string;
+  created_at: string;
 }
 
 interface Conversation {
   id: string;
+  otherUserId: string;
   clientName: string;
   clientAvatar: string;
   lastMessage: string;
@@ -23,49 +33,70 @@ interface Conversation {
 }
 
 // ============================================================
-// Mock Data
+// Mock Data (fallback when no real messages exist)
 // ============================================================
 
 const mockConversations: Conversation[] = [
   {
     id: 'conv-1',
+    otherUserId: 'mock-user-1',
     clientName: 'Maria Santos',
     clientAvatar: 'https://i.pravatar.cc/40?img=5',
     lastMessage: 'Hi, are you available tomorrow for a plumbing job?',
     timeAgo: '2 min ago',
     unread: 2,
     messages: [
-      { id: 'm1', sender: 'client', content: 'Hi! I need help with my kitchen sink', time: '10:30 AM' },
-      { id: 'm2', sender: 'worker', content: 'Hello! What seems to be the problem?', time: '10:32 AM' },
-      { id: 'm3', sender: 'client', content: 'The faucet is leaking badly', time: '10:33 AM' },
-      { id: 'm4', sender: 'client', content: 'Hi, are you available tomorrow for a plumbing job?', time: '10:45 AM' },
+      { id: 'm1', sender: 'client', content: 'Hi! I need help with my kitchen sink', time: '10:30 AM', created_at: '2024-01-01T10:30:00Z' },
+      { id: 'm2', sender: 'worker', content: 'Hello! What seems to be the problem?', time: '10:32 AM', created_at: '2024-01-01T10:32:00Z' },
+      { id: 'm3', sender: 'client', content: 'The faucet is leaking badly', time: '10:33 AM', created_at: '2024-01-01T10:33:00Z' },
+      { id: 'm4', sender: 'client', content: 'Hi, are you available tomorrow for a plumbing job?', time: '10:45 AM', created_at: '2024-01-01T10:45:00Z' },
     ],
   },
   {
     id: 'conv-2',
+    otherUserId: 'mock-user-2',
     clientName: 'Roberto Cruz',
     clientAvatar: 'https://i.pravatar.cc/40?img=12',
     lastMessage: 'Thanks for the great work yesterday!',
     timeAgo: '1 hour ago',
     unread: 0,
     messages: [
-      { id: 'm5', sender: 'client', content: 'Can you come check my electrical wiring?', time: '9:00 AM' },
-      { id: 'm6', sender: 'worker', content: 'Sure, I can come this afternoon', time: '9:15 AM' },
-      { id: 'm7', sender: 'client', content: 'Thanks for the great work yesterday!', time: '5:00 PM' },
+      { id: 'm5', sender: 'client', content: 'Can you come check my electrical wiring?', time: '9:00 AM', created_at: '2024-01-01T09:00:00Z' },
+      { id: 'm6', sender: 'worker', content: 'Sure, I can come this afternoon', time: '9:15 AM', created_at: '2024-01-01T09:15:00Z' },
+      { id: 'm7', sender: 'client', content: 'Thanks for the great work yesterday!', time: '5:00 PM', created_at: '2024-01-01T17:00:00Z' },
     ],
   },
   {
     id: 'conv-3',
+    otherUserId: 'mock-user-3',
     clientName: 'Elena Ramos',
     clientAvatar: 'https://i.pravatar.cc/40?img=32',
     lastMessage: 'How much would it cost to fix a broken pipe?',
     timeAgo: '3 hours ago',
     unread: 1,
     messages: [
-      { id: 'm8', sender: 'client', content: 'How much would it cost to fix a broken pipe?', time: '7:00 AM' },
+      { id: 'm8', sender: 'client', content: 'How much would it cost to fix a broken pipe?', time: '7:00 AM', created_at: '2024-01-01T07:00:00Z' },
     ],
   },
 ];
+
+// ============================================================
+// Helper: format relative time
+// ============================================================
+
+function formatTimeAgo(dateStr: string): string {
+  const now = new Date();
+  const date = new Date(dateStr);
+  const diffMs = now.getTime() - date.getTime();
+  const diffMin = Math.floor(diffMs / 60000);
+
+  if (diffMin < 1) return 'Just now';
+  if (diffMin < 60) return `${diffMin} min ago`;
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
+}
 
 // ============================================================
 // Typing Indicator Component
@@ -88,14 +119,154 @@ function TypingIndicator() {
 // ============================================================
 
 export default function WorkerMessages() {
-  const [conversations, setConversations] = useState<Conversation[]>(mockConversations);
+  const { user } = useAuthStore();
+  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [newMsg, setNewMsg] = useState('');
   const [showTyping, setShowTyping] = useState(false);
   const [mobileShowChat, setMobileShowChat] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSending, setIsSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const activeConversation = conversations.find((c) => c.id === activeConvId) || null;
+
+  // ============================================================
+  // Load real messages from Supabase and group into conversations
+  // ============================================================
+
+  const loadRealMessages = useCallback(async () => {
+    if (!user?.id) {
+      setConversations(mockConversations);
+      setIsLoading(false);
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      const { data: allMessages } = await getAllMessages();
+
+      if (!allMessages || allMessages.length === 0) {
+        // No real messages — fall back to mock data for demo stability
+        setConversations(mockConversations);
+        setIsLoading(false);
+        return;
+      }
+
+      // Group messages by the OTHER person in each conversation
+      const conversationMap = new Map<string, Message[]>();
+
+      for (const msg of allMessages) {
+        const otherUserId = msg.sender_id === user.id ? msg.receiver_id : msg.sender_id;
+        if (!conversationMap.has(otherUserId)) {
+          conversationMap.set(otherUserId, []);
+        }
+        conversationMap.get(otherUserId)!.push(msg);
+      }
+
+      // Look up names for the other users (try users table first, then workers)
+      const otherUserIds = Array.from(conversationMap.keys());
+
+      // Try to get user emails from users table
+      const { data: usersData } = await supabase
+        .from('users')
+        .select('id, email')
+        .in('id', otherUserIds);
+
+      // Try to get worker names
+      const { data: workersData } = await supabase
+        .from('workers')
+        .select('user_id, name')
+        .in('user_id', otherUserIds);
+
+      const userNameMap = new Map<string, string>();
+      if (workersData) {
+        for (const w of workersData) {
+          userNameMap.set(w.user_id, w.name);
+        }
+      }
+      if (usersData) {
+        for (const u of usersData) {
+          if (!userNameMap.has(u.id)) {
+            // Use email prefix as name fallback
+            userNameMap.set(u.id, u.email.split('@')[0]);
+          }
+        }
+      }
+
+      // Build conversation objects
+      const convs: Conversation[] = [];
+      let convIndex = 0;
+
+      for (const [otherUserId, msgs] of conversationMap.entries()) {
+        const sortedMsgs = msgs.sort(
+          (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+        );
+        const lastMsg = sortedMsgs[sortedMsgs.length - 1];
+        const unreadCount = sortedMsgs.filter(
+          (m) => m.receiver_id === user.id && !m.is_read
+        ).length;
+
+        const clientName = userNameMap.get(otherUserId) || `User ${convIndex + 1}`;
+        // Generate a consistent avatar based on the user ID
+        const avatarSeed = Math.abs(otherUserId.charCodeAt(0) + otherUserId.charCodeAt(1)) % 70;
+
+        const chatMessages: ChatMessage[] = sortedMsgs.map((m) => ({
+          id: m.id,
+          sender: m.sender_id === user.id ? 'worker' : 'client',
+          content: m.content,
+          time: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          created_at: m.created_at,
+        }));
+
+        convs.push({
+          id: `conv-real-${otherUserId}`,
+          otherUserId,
+          clientName,
+          clientAvatar: `https://i.pravatar.cc/40?img=${avatarSeed}`,
+          lastMessage: lastMsg.content,
+          timeAgo: formatTimeAgo(lastMsg.created_at),
+          unread: unreadCount,
+          messages: chatMessages,
+        });
+
+        convIndex++;
+      }
+
+      // Sort conversations by most recent message
+      convs.sort((a, b) => {
+        const aLast = a.messages[a.messages.length - 1]?.created_at || '';
+        const bLast = b.messages[b.messages.length - 1]?.created_at || '';
+        return new Date(bLast).getTime() - new Date(aLast).getTime();
+      });
+
+      setConversations(convs);
+    } catch (err) {
+      console.warn('Failed to load messages, using mock data:', err);
+      setConversations(mockConversations);
+    }
+
+    setIsLoading(false);
+  }, [user?.id]);
+
+  useEffect(() => {
+    loadRealMessages();
+  }, [loadRealMessages]);
+
+  // Subscribe to realtime messages
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const channel = subscribeToMessages(user.id, () => {
+      // A new message arrived — reload conversations to stay in sync
+      loadRealMessages();
+    });
+
+    return () => {
+      channel.unsubscribe();
+    };
+  }, [user?.id, loadRealMessages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -104,10 +275,22 @@ export default function WorkerMessages() {
   const handleSelectConversation = (convId: string) => {
     setActiveConvId(convId);
     setMobileShowChat(true);
-    // Mark as read
+    // Mark as read locally
     setConversations((prev) =>
       prev.map((c) => (c.id === convId ? { ...c, unread: 0 } : c))
     );
+
+    // Mark messages as read in DB
+    const conv = conversations.find((c) => c.id === convId);
+    if (conv && user?.id) {
+      supabase
+        .from('messages')
+        .update({ is_read: true })
+        .eq('receiver_id', user.id)
+        .eq('sender_id', conv.otherUserId)
+        .eq('is_read', false)
+        .then(() => {});
+    }
   };
 
   const handleBack = () => {
@@ -115,24 +298,39 @@ export default function WorkerMessages() {
     setActiveConvId(null);
   };
 
-  const handleSend = () => {
-    if (!newMsg.trim() || !activeConvId) return;
+  const handleSend = async () => {
+    if (!newMsg.trim() || !activeConversation) return;
+    setIsSending(true);
 
-    const newMessage: ChatMessage = {
-      id: `m-${Date.now()}`,
+    const otherUserId = activeConversation.otherUserId;
+
+    // Optimistic UI update
+    const optimisticMsg: ChatMessage = {
+      id: `local-${Date.now()}`,
       sender: 'worker',
       content: newMsg.trim(),
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      created_at: new Date().toISOString(),
     };
 
     setConversations((prev) =>
       prev.map((c) =>
         c.id === activeConvId
-          ? { ...c, messages: [...c.messages, newMessage], lastMessage: newMessage.content, timeAgo: 'Just now' }
+          ? {
+              ...c,
+              messages: [...c.messages, optimisticMsg],
+              lastMessage: optimisticMsg.content,
+              timeAgo: 'Just now',
+            }
           : c
       )
     );
     setNewMsg('');
+
+    // Send to Supabase
+    await sendMessage(otherUserId, optimisticMsg.content);
+
+    setIsSending(false);
 
     // Show typing indicator briefly
     setShowTyping(true);
@@ -145,6 +343,21 @@ export default function WorkerMessages() {
       handleSend();
     }
   };
+
+  // ============================================================
+  // Loading State
+  // ============================================================
+
+  if (isLoading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <div className="w-10 h-10 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-sm text-gray-500">Loading messages...</p>
+        </div>
+      </div>
+    );
+  }
 
   // ============================================================
   // Conversation List Panel
@@ -166,6 +379,13 @@ export default function WorkerMessages() {
 
       {/* Conversation items */}
       <div className="flex-1 overflow-y-auto">
+        {conversations.length === 0 && (
+          <div className="flex flex-col items-center justify-center h-full text-center p-4">
+            <p className="text-4xl mb-3">📭</p>
+            <p className="text-gray-500 text-sm">No messages yet</p>
+            <p className="text-gray-400 text-xs mt-1">Messages from clients will appear here</p>
+          </div>
+        )}
         {conversations.map((conv) => (
           <button
             key={conv.id}
@@ -281,7 +501,7 @@ export default function WorkerMessages() {
             />
             <button
               onClick={handleSend}
-              disabled={!newMsg.trim()}
+              disabled={isSending || !newMsg.trim()}
               className="min-w-[44px] min-h-[44px] bg-blue-600 text-white rounded-full flex items-center justify-center hover:bg-blue-700 disabled:opacity-50 transition-colors active:scale-95"
               aria-label="Send message"
             >

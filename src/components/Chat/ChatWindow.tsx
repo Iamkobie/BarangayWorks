@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useAuthStore } from '../../store/authStore';
+import { supabase } from '../../services/supabase';
 import {
   sendMessage,
   getConversation,
@@ -29,50 +30,83 @@ function TypingIndicator() {
 // ============================================================
 
 export default function ChatWindow() {
-  const { userId: otherUserId } = useParams<{ userId: string }>();
+  // The URL param is the worker's TABLE ID (from worker profile link)
+  const { userId: workerTableId } = useParams<{ userId: string }>();
   const { user } = useAuthStore();
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMsg, setNewMsg] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSending, setIsSending] = useState(false);
   const [showTyping, setShowTyping] = useState(false);
+  const [receiverAuthId, setReceiverAuthId] = useState<string | null>(null);
+  const [workerName, setWorkerName] = useState('Service Provider');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Mock worker info for the header
-  const workerInfo = {
-    name: 'Service Provider',
-    avatar: 'https://i.pravatar.cc/40?img=8',
-  };
-
+  // Resolve the worker's auth user_id from their table ID
   useEffect(() => {
-    if (!otherUserId) return;
+    if (!workerTableId) return;
+
+    const resolveWorkerAuthId = async () => {
+      // Try to look up the worker's auth user_id from the workers table
+      const { data: workerData } = await supabase
+        .from('workers')
+        .select('user_id, name')
+        .eq('id', workerTableId)
+        .single();
+
+      if (workerData?.user_id) {
+        setReceiverAuthId(workerData.user_id);
+        if (workerData.name) setWorkerName(workerData.name);
+      } else {
+        // Fallback: maybe the URL param IS already an auth user ID
+        setReceiverAuthId(workerTableId);
+      }
+    };
+
+    resolveWorkerAuthId();
+  }, [workerTableId]);
+
+  // Load messages once we have the resolved auth ID
+  useEffect(() => {
+    if (!receiverAuthId) return;
+
+    const loadMessages = async () => {
+      setIsLoading(true);
+      const { data } = await getConversation(receiverAuthId);
+      setMessages(data);
+      setIsLoading(false);
+    };
+
     loadMessages();
 
-    const channel = subscribeToMessages(otherUserId, (msg) => {
-      setMessages((prev) => [...prev, msg]);
+    const channel = subscribeToMessages(receiverAuthId, (msg) => {
+      // Only add if it's relevant to this conversation
+      if (
+        (msg.sender_id === receiverAuthId && msg.receiver_id === user?.id) ||
+        (msg.sender_id === user?.id && msg.receiver_id === receiverAuthId)
+      ) {
+        setMessages((prev) => {
+          // Avoid duplicates (from optimistic UI)
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          return [...prev, msg];
+        });
+      }
     });
 
     return () => {
       channel.unsubscribe();
     };
-  }, [otherUserId]);
+  }, [receiverAuthId, user?.id]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, showTyping]);
 
-  const loadMessages = async () => {
-    if (!otherUserId) return;
-    setIsLoading(true);
-    const { data } = await getConversation(otherUserId);
-    setMessages(data);
-    setIsLoading(false);
-  };
-
   const handleSend = async () => {
-    if (!newMsg.trim() || !otherUserId) return;
+    if (!newMsg.trim() || !receiverAuthId) return;
     setIsSending(true);
-    const { localMessage } = await sendMessage(otherUserId, newMsg.trim());
+
+    const { localMessage } = await sendMessage(receiverAuthId, newMsg.trim());
     if (localMessage) {
       setMessages((prev) => [...prev, localMessage]);
       setNewMsg('');
@@ -111,12 +145,12 @@ export default function ChatWindow() {
           ←
         </Link>
         <img
-          src={workerInfo.avatar}
-          alt={workerInfo.name}
+          src="https://i.pravatar.cc/40?img=8"
+          alt={workerName}
           className="w-10 h-10 rounded-full object-cover"
         />
         <div className="flex-1">
-          <p className="text-sm font-semibold text-gray-900">{workerInfo.name}</p>
+          <p className="text-sm font-semibold text-gray-900">{workerName}</p>
           <p className="text-xs text-green-500">Online</p>
         </div>
       </header>

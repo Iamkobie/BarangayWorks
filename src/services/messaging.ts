@@ -12,7 +12,8 @@ export interface Message {
 
 /**
  * Send a message to another user.
- * Returns a local message object for optimistic UI (works in demo mode too).
+ * Always attempts to insert into Supabase.
+ * Returns a local message object for optimistic UI regardless.
  */
 export async function sendMessage(
   receiverId: string,
@@ -30,18 +31,20 @@ export async function sendMessage(
     created_at: new Date().toISOString(),
   };
 
-  // Try to insert into DB (silently fails for demo users)
+  // Always try to insert into DB
   try {
-    if (user) {
-      await supabase.from('messages').insert({
-        sender_id: senderId,
-        receiver_id: receiverId,
-        content,
-        is_read: false,
-      });
+    const { error } = await supabase.from('messages').insert({
+      sender_id: senderId,
+      receiver_id: receiverId,
+      content,
+      is_read: false,
+    });
+    if (error) {
+      console.warn('Message insert failed:', error.message);
     }
-  } catch {
-    // OK for demo mode
+  } catch (err) {
+    // Silently fail for demo mode
+    console.warn('Message send error:', err);
   }
 
   return { localMessage: localMsg };
@@ -49,6 +52,7 @@ export async function sendMessage(
 
 /**
  * Get conversation messages between current user and another user.
+ * Uses auth user IDs (not worker table IDs).
  */
 export async function getConversation(
   otherUserId: string
@@ -65,7 +69,28 @@ export async function getConversation(
       )
       .order('created_at', { ascending: true });
 
-    if (error) return { data: [] };
+    if (error) return { data: [], error: error.message };
+    return { data: (data as Message[]) || [] };
+  } catch {
+    return { data: [] };
+  }
+}
+
+/**
+ * Get all messages involving the current user (for inbox view).
+ */
+export async function getAllMessages(): Promise<{ data: Message[]; error?: string }> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { data: [] };
+
+  try {
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`)
+      .order('created_at', { ascending: true });
+
+    if (error) return { data: [], error: error.message };
     return { data: (data as Message[]) || [] };
   } catch {
     return { data: [] };
