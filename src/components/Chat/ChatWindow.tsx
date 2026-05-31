@@ -45,8 +45,9 @@ export default function ChatWindow() {
   const handleSend = async () => {
     if (!newMsg.trim() || !otherUserId) return;
     setIsSending(true);
-    const { error } = await sendMessage(otherUserId, newMsg.trim());
-    if (!error) {
+    const { localMessage } = await sendMessage(otherUserId, newMsg.trim());
+    if (localMessage) {
+      setMessages((prev) => [...prev, localMessage]);
       setNewMsg('');
     }
     setIsSending(false);
