@@ -99,22 +99,6 @@ function formatTimeAgo(dateStr: string): string {
 }
 
 // ============================================================
-// Typing Indicator Component
-// ============================================================
-
-function TypingIndicator() {
-  return (
-    <div className="flex justify-start animate-fade-in">
-      <div className="bg-gray-200 px-4 py-3 rounded-2xl rounded-bl-md flex items-center gap-1">
-        <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-        <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-        <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-      </div>
-    </div>
-  );
-}
-
-// ============================================================
 // WorkerMessages Page
 // ============================================================
 
@@ -128,6 +112,7 @@ export default function WorkerMessages() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSending, setIsSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const activeConversation = conversations.find((c) => c.id === activeConvId) || null;
 
@@ -142,13 +127,10 @@ export default function WorkerMessages() {
       return;
     }
 
-    setIsLoading(true);
-
     try {
       const { data: allMessages } = await getAllMessages();
 
       if (!allMessages || allMessages.length === 0) {
-        // No real messages — fall back to mock data for demo stability
         setConversations(mockConversations);
         setIsLoading(false);
         return;
@@ -165,16 +147,14 @@ export default function WorkerMessages() {
         conversationMap.get(otherUserId)!.push(msg);
       }
 
-      // Look up names for the other users (try users table first, then workers)
+      // Look up names for the other users
       const otherUserIds = Array.from(conversationMap.keys());
 
-      // Try to get user emails from users table
       const { data: usersData } = await supabase
         .from('users')
         .select('id, email')
         .in('id', otherUserIds);
 
-      // Try to get worker names
       const { data: workersData } = await supabase
         .from('workers')
         .select('user_id, name')
@@ -189,7 +169,6 @@ export default function WorkerMessages() {
       if (usersData) {
         for (const u of usersData) {
           if (!userNameMap.has(u.id)) {
-            // Use email prefix as name fallback
             userNameMap.set(u.id, u.email.split('@')[0]);
           }
         }
@@ -209,7 +188,6 @@ export default function WorkerMessages() {
         ).length;
 
         const clientName = userNameMap.get(otherUserId) || `User ${convIndex + 1}`;
-        // Generate a consistent avatar based on the user ID
         const avatarSeed = Math.abs(otherUserId.charCodeAt(0) + otherUserId.charCodeAt(1)) % 70;
 
         const chatMessages: ChatMessage[] = sortedMsgs.map((m) => ({
@@ -250,27 +228,81 @@ export default function WorkerMessages() {
     setIsLoading(false);
   }, [user?.id]);
 
+  // Initial load
   useEffect(() => {
     loadRealMessages();
   }, [loadRealMessages]);
 
-  // Subscribe to realtime messages
+  // Subscribe to realtime messages — append instead of reloading
   useEffect(() => {
     if (!user?.id) return;
 
-    const channel = subscribeToMessages(user.id, () => {
-      // A new message arrived — reload conversations to stay in sync
-      loadRealMessages();
+    const channel = subscribeToMessages(user.id, (msg: Message) => {
+      // Append the new message to the relevant conversation
+      setConversations((prev) => {
+        const otherUserId = msg.sender_id === user.id ? msg.receiver_id : msg.sender_id;
+        const existingConv = prev.find((c) => c.otherUserId === otherUserId);
+
+        if (existingConv) {
+          return prev.map((c) => {
+            if (c.otherUserId === otherUserId) {
+              const newChatMsg: ChatMessage = {
+                id: msg.id,
+                sender: msg.sender_id === user.id ? 'worker' : 'client',
+                content: msg.content,
+                time: new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                created_at: msg.created_at,
+              };
+              // Avoid duplicates
+              if (c.messages.some((m) => m.id === msg.id)) return c;
+              return {
+                ...c,
+                messages: [...c.messages, newChatMsg],
+                lastMessage: msg.content,
+                timeAgo: 'Just now',
+                unread: c.id === activeConvId ? c.unread : c.unread + 1,
+              };
+            }
+            return c;
+          });
+        }
+
+        // New conversation from unknown user — create a new entry
+        const avatarSeed = Math.abs(otherUserId.charCodeAt(0) + (otherUserId.charCodeAt(1) || 0)) % 70;
+        const newChatMsg: ChatMessage = {
+          id: msg.id,
+          sender: msg.sender_id === user.id ? 'worker' : 'client',
+          content: msg.content,
+          time: new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          created_at: msg.created_at,
+        };
+        const newConv: Conversation = {
+          id: `conv-real-${otherUserId}`,
+          otherUserId,
+          clientName: `User`,
+          clientAvatar: `https://i.pravatar.cc/40?img=${avatarSeed}`,
+          lastMessage: msg.content,
+          timeAgo: 'Just now',
+          unread: 1,
+          messages: [newChatMsg],
+        };
+        return [newConv, ...prev];
+      });
     });
 
     return () => {
       channel.unsubscribe();
     };
-  }, [user?.id, loadRealMessages]);
+  }, [user?.id, activeConvId]);
 
+  // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [activeConversation?.messages, showTyping]);
+
+  // ============================================================
+  // Handlers
+  // ============================================================
 
   const handleSelectConversation = (convId: string) => {
     setActiveConvId(convId);
@@ -335,6 +367,9 @@ export default function WorkerMessages() {
     // Show typing indicator briefly
     setShowTyping(true);
     setTimeout(() => setShowTyping(false), 2000);
+
+    // Re-focus input after send
+    inputRef.current?.focus();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -360,177 +395,68 @@ export default function WorkerMessages() {
   }
 
   // ============================================================
-  // Conversation List Panel
-  // ============================================================
-
-  const ConversationList = () => (
-    <div className="flex flex-col h-full bg-white">
-      {/* Header */}
-      <div className="px-4 py-3 border-b border-gray-200 flex items-center gap-3 shrink-0">
-        <Link
-          to="/dashboard/worker"
-          className="min-w-[44px] min-h-[44px] flex items-center justify-center text-blue-600 hover:bg-blue-50 rounded-full transition-colors"
-          aria-label="Back to dashboard"
-        >
-          ←
-        </Link>
-        <h1 className="text-lg font-bold text-gray-900">💬 Messages</h1>
-      </div>
-
-      {/* Conversation items */}
-      <div className="flex-1 overflow-y-auto">
-        {conversations.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-center p-4">
-            <p className="text-4xl mb-3">📭</p>
-            <p className="text-gray-500 text-sm">No messages yet</p>
-            <p className="text-gray-400 text-xs mt-1">Messages from clients will appear here</p>
-          </div>
-        )}
-        {conversations.map((conv) => (
-          <button
-            key={conv.id}
-            onClick={() => handleSelectConversation(conv.id)}
-            className={`w-full flex items-center gap-3 px-4 py-3 min-h-[44px] hover:bg-gray-50 transition-colors border-b border-gray-50 text-left ${
-              activeConvId === conv.id ? 'bg-blue-50' : ''
-            }`}
-          >
-            <img
-              src={conv.clientAvatar}
-              alt={conv.clientName}
-              className="w-12 h-12 rounded-full object-cover shrink-0"
-            />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-semibold text-gray-900 truncate">{conv.clientName}</p>
-                <span className="text-[11px] text-gray-400 shrink-0 ml-2">{conv.timeAgo}</span>
-              </div>
-              <p className="text-xs text-gray-500 truncate mt-0.5">{conv.lastMessage}</p>
-            </div>
-            {conv.unread > 0 && (
-              <span className="bg-red-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center shrink-0">
-                {conv.unread}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-
-  // ============================================================
-  // Chat Panel
-  // ============================================================
-
-  const ChatPanel = () => {
-    if (!activeConversation) {
-      return (
-        <div className="flex-1 flex items-center justify-center bg-gray-50">
-          <div className="text-center animate-fade-in">
-            <p className="text-4xl mb-3">💬</p>
-            <p className="text-gray-500 text-sm">Select a conversation to start chatting</p>
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div className="flex flex-col h-full bg-gray-50 animate-fade-in">
-        {/* Chat Header */}
-        <div className="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-3 shrink-0">
-          {/* Back button only on mobile */}
-          <button
-            onClick={handleBack}
-            className="min-w-[44px] min-h-[44px] flex items-center justify-center text-blue-600 hover:bg-blue-50 rounded-full transition-colors md:hidden"
-            aria-label="Back to conversations"
-          >
-            ←
-          </button>
-          <img
-            src={activeConversation.clientAvatar}
-            alt={activeConversation.clientName}
-            className="w-10 h-10 rounded-full object-cover"
-          />
-          <div>
-            <p className="text-sm font-semibold text-gray-900">{activeConversation.clientName}</p>
-            <p className="text-xs text-green-500">Online</p>
-          </div>
-        </div>
-
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
-          {activeConversation.messages.map((msg) => {
-            const isWorker = msg.sender === 'worker';
-            return (
-              <div
-                key={msg.id}
-                className={`flex ${isWorker ? 'justify-end' : 'justify-start'} animate-fade-in`}
-              >
-                <div
-                  className={`max-w-[75%] px-4 py-2.5 rounded-2xl text-sm shadow-sm ${
-                    isWorker
-                      ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white rounded-br-md'
-                      : 'bg-white text-gray-900 border border-gray-100 rounded-bl-md'
-                  }`}
-                >
-                  <p>{msg.content}</p>
-                  <p
-                    className={`text-[10px] mt-1 ${
-                      isWorker ? 'text-blue-200' : 'text-gray-400'
-                    }`}
-                  >
-                    {msg.time}
-                  </p>
-                </div>
-              </div>
-            );
-          })}
-          {showTyping && <TypingIndicator />}
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Input */}
-        <div className="bg-white border-t border-gray-200 px-4 py-3 shrink-0">
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={newMsg}
-              onChange={(e) => setNewMsg(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Type a message..."
-              className="flex-1 min-h-[44px] px-4 py-2 border border-gray-200 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-            <button
-              onClick={handleSend}
-              disabled={isSending || !newMsg.trim()}
-              className="min-w-[44px] min-h-[44px] bg-blue-600 text-white rounded-full flex items-center justify-center hover:bg-blue-700 disabled:opacity-50 transition-colors active:scale-95"
-              aria-label="Send message"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  // ============================================================
-  // Render
+  // Render — all JSX inlined (no inner component functions)
   // ============================================================
 
   return (
     <div className="h-screen flex flex-col md:flex-row overflow-hidden">
-      {/* Desktop: side-by-side layout */}
-      {/* Mobile: show list or chat based on state */}
-
       {/* Conversation List */}
       <div
         className={`${
           mobileShowChat ? 'hidden' : 'flex'
         } md:flex md:w-[340px] md:border-r md:border-gray-200 h-full flex-col shrink-0`}
       >
-        <ConversationList />
+        <div className="flex flex-col h-full bg-white">
+          {/* Header */}
+          <div className="px-4 py-3 border-b border-gray-200 flex items-center gap-3 shrink-0">
+            <Link
+              to="/dashboard/worker"
+              className="min-w-[44px] min-h-[44px] flex items-center justify-center text-blue-600 hover:bg-blue-50 rounded-full transition-colors"
+              aria-label="Back to dashboard"
+            >
+              ←
+            </Link>
+            <h1 className="text-lg font-bold text-gray-900">💬 Messages</h1>
+          </div>
+
+          {/* Conversation items */}
+          <div className="flex-1 overflow-y-auto">
+            {conversations.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-full text-center p-4">
+                <p className="text-4xl mb-3">📭</p>
+                <p className="text-gray-500 text-sm">No messages yet</p>
+                <p className="text-gray-400 text-xs mt-1">Messages from clients will appear here</p>
+              </div>
+            )}
+            {conversations.map((conv) => (
+              <button
+                key={conv.id}
+                onClick={() => handleSelectConversation(conv.id)}
+                className={`w-full flex items-center gap-3 px-4 py-3 min-h-[44px] hover:bg-gray-50 transition-colors border-b border-gray-50 text-left ${
+                  activeConvId === conv.id ? 'bg-blue-50' : ''
+                }`}
+              >
+                <img
+                  src={conv.clientAvatar}
+                  alt={conv.clientName}
+                  className="w-12 h-12 rounded-full object-cover shrink-0"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-gray-900 truncate">{conv.clientName}</p>
+                    <span className="text-[11px] text-gray-400 shrink-0 ml-2">{conv.timeAgo}</span>
+                  </div>
+                  <p className="text-xs text-gray-500 truncate mt-0.5">{conv.lastMessage}</p>
+                </div>
+                {conv.unread > 0 && (
+                  <span className="bg-red-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center shrink-0">
+                    {conv.unread}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* Chat Panel */}
@@ -539,7 +465,102 @@ export default function WorkerMessages() {
           mobileShowChat ? 'flex' : 'hidden'
         } md:flex flex-1 flex-col h-full`}
       >
-        <ChatPanel />
+        {!activeConversation ? (
+          <div className="flex-1 flex items-center justify-center bg-gray-50">
+            <div className="text-center">
+              <p className="text-4xl mb-3">💬</p>
+              <p className="text-gray-500 text-sm">Select a conversation to start chatting</p>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col h-full bg-gray-50">
+            {/* Chat Header */}
+            <div className="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-3 shrink-0">
+              {/* Back button only on mobile */}
+              <button
+                onClick={handleBack}
+                className="min-w-[44px] min-h-[44px] flex items-center justify-center text-blue-600 hover:bg-blue-50 rounded-full transition-colors md:hidden"
+                aria-label="Back to conversations"
+              >
+                ←
+              </button>
+              <img
+                src={activeConversation.clientAvatar}
+                alt={activeConversation.clientName}
+                className="w-10 h-10 rounded-full object-cover"
+              />
+              <div>
+                <p className="text-sm font-semibold text-gray-900">{activeConversation.clientName}</p>
+                <p className="text-xs text-green-500">Online</p>
+              </div>
+            </div>
+
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+              {activeConversation.messages.map((msg) => {
+                const isWorker = msg.sender === 'worker';
+                return (
+                  <div
+                    key={msg.id}
+                    className={`flex ${isWorker ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`max-w-[75%] px-4 py-2.5 rounded-2xl text-sm shadow-sm ${
+                        isWorker
+                          ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white rounded-br-md'
+                          : 'bg-white text-gray-900 border border-gray-100 rounded-bl-md'
+                      }`}
+                    >
+                      <p>{msg.content}</p>
+                      <p
+                        className={`text-[10px] mt-1 ${
+                          isWorker ? 'text-blue-200' : 'text-gray-400'
+                        }`}
+                      >
+                        {msg.time}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+              {showTyping && (
+                <div className="flex justify-start">
+                  <div className="bg-gray-200 px-4 py-3 rounded-2xl rounded-bl-md flex items-center gap-1">
+                    <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Input — stable, never unmounted */}
+            <div className="bg-white border-t border-gray-200 px-4 py-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={newMsg}
+                  onChange={(e) => setNewMsg(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Type a message..."
+                  className="flex-1 min-h-[44px] px-4 py-2 border border-gray-200 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+                <button
+                  onClick={handleSend}
+                  disabled={isSending || !newMsg.trim()}
+                  className="min-w-[44px] min-h-[44px] bg-blue-600 text-white rounded-full flex items-center justify-center hover:bg-blue-700 disabled:opacity-50 transition-colors active:scale-95"
+                  aria-label="Send message"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
